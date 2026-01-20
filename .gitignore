@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+.venv/
+__pycache__/
+
+# Data Assets (Strict Privacy)
+data/
+training/models/
+
+# System
+.DS_Store
+dist/
+.env
