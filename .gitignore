@@ -11,3 +11,6 @@ training/models/
 .DS_Store
 dist/
 .env
+
+settings.json
+.vscode/
