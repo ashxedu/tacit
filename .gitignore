@@ -7,6 +7,10 @@ __pycache__/
 data/
 training/models/
 
+# Logs 
+training/logs/
+
+
 # System
 .DS_Store
 dist/
