@@ -1,20 +1,26 @@
-import React, { useRef, useEffect, useState } from "react";
+import React, { useRef, useEffect, useState, useCallback } from "react";
 import Webcam from "react-webcam";
 import * as tf from "@tensorflow/tfjs";
 import { Holistic } from "@mediapipe/holistic";
 import { Camera } from "@mediapipe/camera_utils";
 import { drawConnectors, drawLandmarks, POSE_CONNECTIONS, HAND_CONNECTIONS } from "@mediapipe/drawing_utils";
 
-const CLASS_LABELS = ['goodbye', 'go', 'hello', 'help', 'no', 'please', 'sorry', 'stop', 'thank you', 'yes'];
+// ✅ UPDATED LIST (Alphabetical with 'intelligent')
+const CLASS_LABELS = ['go', 'goodbye', 'hello', 'help', 'intelligent', 'no', 'please', 'sorry', 'stop', 'yes'];
 
 const CameraComponent = () => {
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  
   const [model, setModel] = useState(null);
-  const [prediction, setPrediction] = useState("Waiting...");
+  const [prediction, setPrediction] = useState("...");
   const [confidence, setConfidence] = useState(0);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordedChunks, setRecordedChunks] = useState([]);
+  const [targetLabel, setTargetLabel] = useState("hello");
 
-  // Buffer to store the last N predictions for smoothing
+  // Buffer to store recent predictions
   const predictionBuffer = useRef([]); 
 
   useEffect(() => {
@@ -22,9 +28,9 @@ const CameraComponent = () => {
       try {
         const net = await tf.loadLayersModel("/model/model.json");
         setModel(net);
-        setPrediction("Ready!");
+        setPrediction("System Ready");
       } catch (err) {
-        setPrediction("Error");
+        setPrediction("Error Loading Model");
       }
     };
     loadModel();
@@ -43,7 +49,7 @@ const CameraComponent = () => {
     const onResults = async (results) => {
       if (!canvasRef.current || !webcamRef.current || !webcamRef.current.video) return;
 
-      // Draw Logic
+      // 1. Draw
       const videoWidth = webcamRef.current.video.videoWidth;
       const videoHeight = webcamRef.current.video.videoHeight;
       canvasRef.current.width = videoWidth;
@@ -52,16 +58,13 @@ const CameraComponent = () => {
       ctx.save();
       ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
       
-      // Draw Skeleton (Optional: Remove if it's distracting)
       drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS, { color: "#00FF00", lineWidth: 2 });
       drawConnectors(ctx, results.leftHandLandmarks, HAND_CONNECTIONS, { color: "#CC0000", lineWidth: 2 });
       drawConnectors(ctx, results.rightHandLandmarks, HAND_CONNECTIONS, { color: "#00CC00", lineWidth: 2 });
       drawLandmarks(ctx, results.poseLandmarks, { color: "#FF0000", lineWidth: 1, radius: 3 }); 
-      drawLandmarks(ctx, results.leftHandLandmarks, { color: "#00FF00", lineWidth: 1, radius: 3 }); 
-      drawLandmarks(ctx, results.rightHandLandmarks, { color: "#FF0000", lineWidth: 1, radius: 3 }); 
       ctx.restore();
 
-      // Inference Logic
+      // 2. Inference
       if (model) {
         const keypoints = extractKeypoints(results);
         sequence.push(keypoints);
@@ -79,34 +82,39 @@ const CameraComponent = () => {
           input.dispose();
           output.dispose();
 
-          // --- SMOOTHING ALGORITHM ---
-          // 1. Only accept if confidence is high (> 75%)
-          if (currentConf > 0.75) {
+          // --- STRICT SMOOTHING LOGIC ---
+          
+          // Rule 1: Confidence must be VERY high (> 85%)
+          if (currentConf > 0.85) {
             predictionBuffer.current.push(currentWord);
             
-            // Keep buffer size at 8 frames
-            if (predictionBuffer.current.length > 8) {
+            // Rule 2: Must match for 15 frames in a row (approx 0.5 seconds)
+            if (predictionBuffer.current.length > 15) {
               predictionBuffer.current.shift();
             }
 
-            // 2. CHECK CONSENSUS: Do the last 8 frames match?
-            // This prevents "flickering" between similar words like Stop/Help
             const isStable = predictionBuffer.current.every(word => word === currentWord);
-
-            if (isStable && predictionBuffer.current.length === 8) {
+            
+            if (isStable && predictionBuffer.current.length === 15) {
               setPrediction(currentWord.toUpperCase());
               setConfidence(Math.round(currentConf * 100));
             }
+          } else {
+            // Rule 3: If confidence drops, clear the buffer.
+            // This prevents "stale" words from sticking around.
+            predictionBuffer.current = [];
+            // Optional: Uncomment next line if you want text to disappear when you stop signing
+            // setPrediction("..."); 
           }
         }
       }
     };
 
     const holistic = new Holistic({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}` });
-    holistic.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+    holistic.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
     holistic.onResults(onResults);
 
-    if (typeof webcamRef.current !== "undefined" && webcamRef.current !== null) {
+    if (webcamRef.current) {
       const camera = new Camera(webcamRef.current.video, {
         onFrame: async () => { await holistic.send({ image: webcamRef.current.video }); },
         width: 640,
@@ -116,29 +124,61 @@ const CameraComponent = () => {
     }
   }, [model]);
 
+  // --- RECORDING FUNCTIONS ---
+  const handleStartRecording = useCallback(() => {
+    setIsRecording(true);
+    setRecordedChunks([]);
+    const stream = webcamRef.current.stream;
+    mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: "video/webm" });
+    mediaRecorderRef.current.addEventListener("dataavailable", ({ data }) => {
+      if (data.size > 0) setRecordedChunks((prev) => [...prev, data]);
+    });
+    mediaRecorderRef.current.start();
+  }, [webcamRef]);
+
+  const handleStopRecording = useCallback(() => {
+    mediaRecorderRef.current.stop();
+    setIsRecording(false);
+  }, [mediaRecorderRef]);
+
+  useEffect(() => {
+    if (!isRecording && recordedChunks.length > 0) {
+      const blob = new Blob(recordedChunks, { type: "video/webm" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${targetLabel}_contribution_${Date.now()}.webm`; 
+      a.click();
+      window.URL.revokeObjectURL(url);
+      setRecordedChunks([]);
+    }
+  }, [recordedChunks, isRecording, targetLabel]);
+
   return (
-    <div style={{ position: "relative", width: "640px", height: "480px" }}>
-      {/* Overlay UI */}
-      <div style={{
-        position: "absolute",
-        top: 20,
-        left: 0,
-        right: 0,
-        textAlign: "center",
-        zIndex: 20,
-        color: "white",
-        textShadow: "2px 2px 4px #000000",
-      }}>
-        <h2 style={{ fontSize: "50px", margin: 0, color: "#00FF00", textTransform: "uppercase" }}>
-          {prediction}
-        </h2>
-        <p style={{ fontSize: "20px", margin: 0, fontWeight: "bold" }}>
-          Accuracy: {confidence}%
+    <div style={{ position: "relative", width: "640px", height: "480px", margin: "auto" }}>
+      
+      {/* UI OVERLAY */}
+      <div style={{ position: "absolute", top: 20, width: "100%", textAlign: "center", zIndex: 20, color: "white", textShadow: "2px 2px 4px #000" }}>
+        <h2 style={{ fontSize: "50px", margin: 0, color: "#00FF00" }}>{prediction}</h2>
+        <p style={{ fontSize: "18px", fontWeight: "bold", color: "#ddd"}}>
+          {confidence > 0 ? `Confidence: ${confidence}%` : "Waiting for sign..."}
         </p>
       </div>
 
-      <Webcam ref={webcamRef} style={{ position: "absolute", left: 0, right: 0, zIndex: 9, width: 640, height: 480 }} />
-      <canvas ref={canvasRef} style={{ position: "absolute", left: 0, right: 0, zIndex: 9, width: 640, height: 480 }} />
+      <Webcam ref={webcamRef} style={{ position: "absolute", left: 0, top: 0, zIndex: 9, width: 640, height: 480 }} />
+      <canvas ref={canvasRef} style={{ position: "absolute", left: 0, top: 0, zIndex: 10, width: 640, height: 480 }} />
+
+      {/* CONTROLS */}
+      <div style={{ position: "absolute", bottom: 20, width: "100%", textAlign: "center", zIndex: 30 }}>
+        <select value={targetLabel} onChange={(e) => setTargetLabel(e.target.value)} style={{ padding: "10px", marginRight: "10px", borderRadius: "5px" }}>
+          {CLASS_LABELS.map(word => <option key={word} value={word}>{word.toUpperCase()}</option>)}
+        </select>
+        {isRecording ? (
+          <button onClick={handleStopRecording} style={{ padding: "10px 20px", backgroundColor: "red", color: "white", border: "none", borderRadius: "5px" }}>⏹ Stop</button>
+        ) : (
+          <button onClick={handleStartRecording} style={{ padding: "10px 20px", backgroundColor: "#007BFF", color: "white", border: "none", borderRadius: "5px" }}>🔴 Contribute Data</button>
+        )}
+      </div>
     </div>
   );
 };
