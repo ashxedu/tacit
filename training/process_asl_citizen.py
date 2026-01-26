@@ -22,7 +22,13 @@ SEARCH_TERMS = {
     "no": "no",
     "help": "help",
     "go": "go",
-    "stop": "stop"
+    "stop": "stop",
+    # --- BATCH 2 (New) ---
+    "me": "me",        
+    "you": "you",       
+    "love": "love",   
+    "happy": "happy",   
+    "sad": "sad"        
 }
 
 MAX_SAMPLES = 50 

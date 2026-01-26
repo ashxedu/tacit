@@ -10,7 +10,11 @@ import { Canvas } from "@react-three/fiber";
 import FloatingText from "./FloatingText";
 
 // Alphabetical List
-const CLASS_LABELS = ['go', 'goodbye', 'hello', 'help', 'intelligent', 'no', 'please', 'sorry', 'stop', 'yes'];
+const CLASS_LABELS = [
+  'go', 'goodbye', 'happy', 'hello', 'help', 
+  'intelligent', 'love', 'me', 'no', 'please', 
+  'sad', 'sorry', 'stop', 'yes', 'you'
+];
 
 const CameraComponent = () => {
   const webcamRef = useRef(null);
