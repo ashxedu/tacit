@@ -31,7 +31,9 @@ SEARCH_TERMS = {
     "sad": "sad"        
 }
 
-MAX_SAMPLES = 50 
+# --- ACCURACY UPGRADE 1: MORE DATA ---
+# ASL Citizen is large. We can afford 80 samples for these common words.
+MAX_SAMPLES = 80 
 
 mp_holistic = mp.solutions.holistic
 holistic = mp_holistic.Holistic(static_image_mode=False, model_complexity=1, smooth_landmarks=True)
@@ -81,12 +83,12 @@ def main():
     print(f"🚀 Scanning ASL Citizen Index ({len(full_df)} rows)...")
 
     for target_label, search_term in SEARCH_TERMS.items():
-        subset = full_df[full_df['clean_gloss'].str.contains(search_term, na=False)]
+        # STRICT FILTERING for short words to avoid garbage data
+        if target_label in ["me", "you", "no", "go"]:
+            subset = full_df[full_df['clean_gloss'] == search_term]
+        else:
+            subset = full_df[full_df['clean_gloss'].str.contains(search_term, na=False)]
         
-        # Strict check for "no" to avoid "know" or "now"
-        if target_label == "no": 
-            subset = full_df[full_df['clean_gloss'] == "no"]
-
         print(f"   🔍 Processing '{target_label.upper()}' (Found {len(subset)} candidates)...")
         
         for _, row in subset.iterrows():
@@ -104,7 +106,7 @@ def main():
             
     print("\n📊 EXTRACTION REPORT:")
     for word, count in stats.items():
-        status = "✅ READY" if count >= 15 else "❌ LOW DATA"
+        status = "✅ READY" if count >= 20 else "❌ LOW DATA"
         print(f"{word.upper():<15} : {count} samples \t {status}")
 
 if __name__ == "__main__":
