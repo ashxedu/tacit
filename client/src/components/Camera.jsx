@@ -3,19 +3,14 @@ import Webcam from "react-webcam";
 import * as tf from "@tensorflow/tfjs";
 import { Holistic } from "@mediapipe/holistic";
 import { Camera } from "@mediapipe/camera_utils";
-import { drawConnectors, drawLandmarks, POSE_CONNECTIONS, HAND_CONNECTIONS } from "@mediapipe/drawing_utils";
+import { drawConnectors, POSE_CONNECTIONS, HAND_CONNECTIONS } from "@mediapipe/drawing_utils";
 
 // 3D Imports
 import { Canvas } from "@react-three/fiber";
 import FloatingText from "./FloatingText";
 
-// Alphabetical List
-const CLASS_LABELS = [
-  'go', 'goodbye', 'happy', 'hello', 'help', 
-  'intelligent', 'love', 'me', 'no', 'please', 
-  'sad', 'sorry', 'stop', 'yes', 'you'
-];
-
+// Alphabetical List (Must match Python training EXACTLY)
+const CLASS_LABELS = ['go', 'goodbye', 'happy', 'hello', 'help', 'intelligent', 'love', 'me', 'no', 'please', 'sad', 'sorry', 'stop', 'yes', 'you'];
 const CameraComponent = () => {
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
@@ -24,16 +19,19 @@ const CameraComponent = () => {
   const [prediction, setPrediction] = useState("Loading...");
   const [confidence, setConfidence] = useState(0);
 
-  // Smoothing Buffer
+  // Logic Buffers
   const predictionBuffer = useRef([]); 
+  const frameCounter = useRef(0); // For throttling
 
   useEffect(() => {
     const loadModel = async () => {
       try {
+        // Load the JSON model from the public folder
         const net = await tf.loadLayersModel("/model/model.json");
         setModel(net);
         setPrediction("Tacit OS");
       } catch (err) {
+        console.error(err);
         setPrediction("System Failure");
       }
     };
@@ -41,9 +39,21 @@ const CameraComponent = () => {
   }, []);
 
   const extractKeypoints = (results) => {
-    const pose = results.poseLandmarks ? results.poseLandmarks.flatMap(res => [res.x, res.y, res.z, res.visibility]) : new Array(33 * 4).fill(0);
-    const lh = results.leftHandLandmarks ? results.leftHandLandmarks.flatMap(res => [res.x, res.y, res.z]) : new Array(21 * 3).fill(0);
-    const rh = results.rightHandLandmarks ? results.rightHandLandmarks.flatMap(res => [res.x, res.y, res.z]) : new Array(21 * 3).fill(0);
+    // Pose: 33 * 4 = 132
+    const pose = results.poseLandmarks 
+      ? results.poseLandmarks.flatMap(res => [res.x, res.y, res.z, res.visibility]) 
+      : new Array(132).fill(0);
+
+    // Left Hand: 21 * 3 = 63
+    const lh = results.leftHandLandmarks 
+      ? results.leftHandLandmarks.flatMap(res => [res.x, res.y, res.z]) 
+      : new Array(63).fill(0);
+
+    // Right Hand: 21 * 3 = 63
+    const rh = results.rightHandLandmarks 
+      ? results.rightHandLandmarks.flatMap(res => [res.x, res.y, res.z]) 
+      : new Array(63).fill(0);
+
     return [...pose, ...lh, ...rh];
   };
 
@@ -53,7 +63,7 @@ const CameraComponent = () => {
     const onResults = async (results) => {
       if (!canvasRef.current || !webcamRef.current || !webcamRef.current.video) return;
 
-      // 1. Set Canvas Dimensions to match Video (Internal Resolution)
+      // 1. Draw Skeleton (Visual Feedback)
       const videoWidth = webcamRef.current.video.videoWidth;
       const videoHeight = webcamRef.current.video.videoHeight;
       canvasRef.current.width = videoWidth;
@@ -63,19 +73,22 @@ const CameraComponent = () => {
       ctx.save();
       ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
       
-      // 2. Draw Skeleton (Thinner lines for the small view)
+      // Draw connectors (Green for body, White for hands)
       drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS, { color: "rgba(0, 255, 0, 0.5)", lineWidth: 1 });
       drawConnectors(ctx, results.leftHandLandmarks, HAND_CONNECTIONS, { color: "rgba(255, 255, 255, 0.8)", lineWidth: 1 });
       drawConnectors(ctx, results.rightHandLandmarks, HAND_CONNECTIONS, { color: "rgba(255, 255, 255, 0.8)", lineWidth: 1 });
       ctx.restore();
 
-      // 3. AI Inference
+      // 2. Data Collection (Run every frame to fill buffer)
       if (model) {
         const keypoints = extractKeypoints(results);
         sequence.push(keypoints);
-        if (sequence.length > 30) sequence.shift();
+        if (sequence.length > 30) sequence.shift(); // Keep only last 30 frames
 
-        if (sequence.length === 30) {
+        // 3. AI Inference (Run ONLY every 3rd frame to save CPU)
+        frameCounter.current += 1;
+        if (sequence.length === 30 && frameCounter.current % 3 === 0) {
+          
           const input = tf.tensor([sequence]); 
           const output = model.predict(input);
           const values = await output.data();
@@ -83,27 +96,46 @@ const CameraComponent = () => {
           const currentWord = CLASS_LABELS[maxIndex];
           const currentConf = values[maxIndex];
 
-          input.dispose(); output.dispose();
+          input.dispose(); output.dispose(); // Clean up memory
 
-          // Strict Smoothing Logic
-          if (currentConf > 0.85) {
-            predictionBuffer.current.push(currentWord);
-            if (predictionBuffer.current.length > 15) predictionBuffer.current.shift();
+          // --- FORGIVING SMOOTHING LOGIC ---
+          // Threshold reduced to 60% so it's less "shy"
+          if (currentConf > 0.60) {
             
-            const isStable = predictionBuffer.current.every(word => word === currentWord);
-            if (isStable && predictionBuffer.current.length === 15) {
-              setPrediction(currentWord.toUpperCase());
+            predictionBuffer.current.push(currentWord);
+            
+            // Only look at last 7 predictions (approx 0.5 seconds)
+            if (predictionBuffer.current.length > 7) {
+              predictionBuffer.current.shift();
+            }
+            
+            // Majority Vote: If 4+ frames agree, show the word
+            const counts = {};
+            predictionBuffer.current.forEach(word => { counts[word] = (counts[word] || 0) + 1; });
+            
+            const mostFrequentWord = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
+            
+            if (counts[mostFrequentWord] >= 4) {
+              setPrediction(mostFrequentWord.toUpperCase());
               setConfidence(Math.round(currentConf * 100));
             }
+
           } else {
+             // If confidence is low, clear buffer (Reset)
              predictionBuffer.current = [];
           }
         }
       }
     };
 
+    // Initialize MediaPipe
     const holistic = new Holistic({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}` });
-    holistic.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+    holistic.setOptions({ 
+      modelComplexity: 1, 
+      smoothLandmarks: true, 
+      minDetectionConfidence: 0.5, 
+      minTrackingConfidence: 0.5 
+    });
     holistic.onResults(onResults);
 
     if (webcamRef.current) {
@@ -136,7 +168,7 @@ const CameraComponent = () => {
         position: "absolute",
         bottom: "30px",
         right: "30px",
-        width: "320px",  // Mini-map size
+        width: "320px",
         height: "240px",
         borderRadius: "15px",
         overflow: "hidden",
@@ -148,7 +180,7 @@ const CameraComponent = () => {
         {/* Webcam Video */}
         <Webcam 
           ref={webcamRef} 
-          style={{ width: "100%", height: "100%", objectFit: "cover", transform: "scaleX(-1)" }} // Mirror effect
+          style={{ width: "100%", height: "100%", objectFit: "cover", transform: "scaleX(-1)" }} 
         />
         
         {/* Skeleton Overlay */}
@@ -163,7 +195,7 @@ const CameraComponent = () => {
           bottom: "10px",
           left: "10px",
           backgroundColor: "rgba(0, 0, 0, 0.7)",
-          color: confidence > 80 ? "#00FF00" : "#888",
+          color: confidence > 80 ? "#00FF00" : (confidence > 50 ? "#FFFF00" : "#FF0000"),
           padding: "4px 8px",
           borderRadius: "4px",
           fontSize: "12px",
