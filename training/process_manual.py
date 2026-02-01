@@ -9,7 +9,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW_DIR = os.path.join(BASE_DIR, "data", "raw")
 OUTPUT_DIR = os.path.join(BASE_DIR, "data", "processed")
 
-# MediaPipe Setup
+# MediaPipe Setup (Holistic = Pose + Hands + Face)
 mp_holistic = mp.solutions.holistic
 holistic = mp_holistic.Holistic(
     static_image_mode=False, 
@@ -19,6 +19,7 @@ holistic = mp_holistic.Holistic(
 
 def extract_keypoints(results):
     # Pose (33*4) + Left Hand (21*3) + Right Hand (21*3) = 258 landmarks
+    # If a hand is missing, fill it with zeros
     pose = np.array([[res.x, res.y, res.z, res.visibility] for res in results.pose_landmarks.landmark]).flatten() if results.pose_landmarks else np.zeros(33*4)
     lh = np.array([[res.x, res.y, res.z] for res in results.left_hand_landmarks.landmark]).flatten() if results.left_hand_landmarks else np.zeros(21*3)
     rh = np.array([[res.x, res.y, res.z] for res in results.right_hand_landmarks.landmark]).flatten() if results.right_hand_landmarks else np.zeros(21*3)
@@ -30,6 +31,8 @@ def process_video(video_path):
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret: break
+        
+        # MediaPipe needs RGB
         image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = holistic.process(image)
         frames.append(extract_keypoints(results))
@@ -37,9 +40,14 @@ def process_video(video_path):
     return frames
 
 def main():
+    # Clean recreate of processed folder
     if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
     
-    # Get all folders in data/raw that contain videos
+    # Get all folders in data/raw
+    if not os.path.exists(RAW_DIR):
+        print(f"❌ Error: {RAW_DIR} does not exist.")
+        return
+
     labels = [d for d in os.listdir(RAW_DIR) if os.path.isdir(os.path.join(RAW_DIR, d))]
     
     print(f"🚀 Found {len(labels)} classes: {labels}")
@@ -48,7 +56,6 @@ def main():
     
     for label in labels:
         folder_path = os.path.join(RAW_DIR, label)
-        # Filter for video extensions
         video_files = [f for f in os.listdir(folder_path) if f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv'))]
         
         print(f"   📂 Processing '{label}' ({len(video_files)} videos)...")
@@ -56,16 +63,15 @@ def main():
         for video_file in tqdm(video_files):
             input_path = os.path.join(folder_path, video_file)
             
-            # Process video to extract skeleton
+            # Process
             sequence = process_video(input_path)
             
-            # Save if valid data found
+            # Save if valid (non-empty)
             if len(sequence) > 0:
-                # Use splitext to handle filenames with multiple dots safely
-                safe_filename = os.path.splitext(video_file)[0]
-                save_name = f"{label}_{safe_filename}.npy"
-                
-                np.save(os.path.join(OUTPUT_DIR, save_name), np.array(sequence))
+                # Safe filename handling
+                safe_name = os.path.splitext(video_file)[0]
+                save_path = os.path.join(OUTPUT_DIR, f"{label}_{safe_name}.npy")
+                np.save(save_path, np.array(sequence))
                 total_videos += 1
 
     print(f"✅ DONE! Processed {total_videos} videos into {OUTPUT_DIR}")
