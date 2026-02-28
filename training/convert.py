@@ -1,26 +1,26 @@
 import sys
 import os
+import json
+import pickle
 from unittest.mock import MagicMock
 
-# fake 'tensorflow_decision_forests' module into Python's memory.
-# This stops tensorflowjs from crashing when it tries to import it.
+# --- THE FIX: TRICK WINDOWS ---
 sys.modules["tensorflow_decision_forests"] = MagicMock()
 sys.modules["tensorflow_decision_forests.keras"] = MagicMock()
-
 
 import tensorflow as tf
 import tensorflowjs as tfjs
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# ⚠️ UPDATED: Now pointing to the new Transformer model!
 MODEL_PATH = os.path.join(BASE_DIR, "training", "models", "tacit_transformer.h5")
+CLASSES_PKL = os.path.join(BASE_DIR, "training", "models", "classes.pkl")
 OUTPUT_PATH = os.path.join(BASE_DIR, "client", "public", "model")
+CLASSES_JSON = os.path.join(OUTPUT_PATH, "classes.json")
 
 def main():
-    print(f"📂 Loading Keras Transformer model from: {MODEL_PATH}")
+    print(f"📂 Loading Keras model from: {MODEL_PATH}")
     
-    # Load the trained model
     try:
         model = tf.keras.models.load_model(MODEL_PATH)
     except OSError:
@@ -28,16 +28,22 @@ def main():
         return
 
     print(f"🚀 Converting to TensorFlow.js format...")
-    
-    # Ensure output directory exists
     if not os.path.exists(OUTPUT_PATH):
         os.makedirs(OUTPUT_PATH)
 
-    # Convert and Save
+    # Convert Model
     tfjs.converters.save_keras_model(model, OUTPUT_PATH)
-    
-    print(f"✅ SUCCESS! Transformer model saved to: {OUTPUT_PATH}")
-    print("   You should see 'model.json' and binary shard files there.")
+    print(f"✅ SUCCESS! Model saved to: {OUTPUT_PATH}")
+
+    # Convert Classes to JSON
+    if os.path.exists(CLASSES_PKL):
+        with open(CLASSES_PKL, 'rb') as f:
+            classes = pickle.load(f)
+        with open(CLASSES_JSON, 'w') as f:
+            json.dump(classes, f)
+        print(f"✅ SUCCESS! Classes exported to: {CLASSES_JSON}")
+    else:
+        print("⚠️ Warning: classes.pkl not found. Skipping JSON export.")
 
 if __name__ == "__main__":
     main()

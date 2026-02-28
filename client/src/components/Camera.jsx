@@ -9,8 +9,6 @@ import { drawConnectors, POSE_CONNECTIONS, HAND_CONNECTIONS } from "@mediapipe/d
 import { Canvas } from "@react-three/fiber";
 import FloatingText from "./FloatingText";
 
-// Alphabetical List (Must match Python training EXACTLY)
-const CLASS_LABELS = ['america', 'book', 'christmas', 'confused', 'earth', 'help', 'intelligent', 'love', 'music', 'pain', 'person', 'sick', 'stop', 'technology', 'welcome'];
 const CameraComponent = () => {
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
@@ -19,23 +17,29 @@ const CameraComponent = () => {
   const [prediction, setPrediction] = useState("Loading...");
   const [confidence, setConfidence] = useState(0);
 
-  // Logic Buffers
+  // Logic Buffers & Refs
   const predictionBuffer = useRef([]); 
-  const frameCounter = useRef(0); // For throttling
+  const frameCounter = useRef(0); // For throttling CPU
+  const classLabelsRef = useRef([]); // Stores dynamic JSON labels safely without causing re-renders
 
   useEffect(() => {
-    const loadModel = async () => {
+    const loadModelAndClasses = async () => {
       try {
-        // Load the JSON model from the public folder
+        // 1. Load the JSON model from the public folder
         const net = await tf.loadLayersModel("/model/model.json");
         setModel(net);
+        
+        // 2. Load the dynamic class labels exported by convert.py
+        const response = await fetch("/model/classes.json");
+        classLabelsRef.current = await response.json();
+        
         setPrediction("Tacit OS");
       } catch (err) {
-        console.error(err);
+        console.error("Error loading model or classes:", err);
         setPrediction("System Failure");
       }
     };
-    loadModel();
+    loadModelAndClasses();
   }, []);
 
   const extractKeypoints = (results) => {
@@ -80,7 +84,8 @@ const CameraComponent = () => {
       ctx.restore();
 
       // 2. Data Collection (Run every frame to fill buffer)
-      if (model) {
+      // Ensure the model AND the dynamic labels are fully loaded before predicting
+      if (model && classLabelsRef.current.length > 0) {
         const keypoints = extractKeypoints(results);
         sequence.push(keypoints);
         if (sequence.length > 30) sequence.shift(); // Keep only last 30 frames
@@ -93,13 +98,14 @@ const CameraComponent = () => {
           const output = model.predict(input);
           const values = await output.data();
           const maxIndex = values.indexOf(Math.max(...values));
-          const currentWord = CLASS_LABELS[maxIndex];
+          
+          // DYNAMIC LABEL FETCH:
+          const currentWord = classLabelsRef.current[maxIndex];
           const currentConf = values[maxIndex];
 
-          input.dispose(); output.dispose(); // Clean up memory
+          input.dispose(); output.dispose(); // Clean up memory to prevent leaks
 
           // --- FORGIVING SMOOTHING LOGIC ---
-          // Threshold reduced to 60% so it's less "shy"
           if (currentConf > 0.60) {
             
             predictionBuffer.current.push(currentWord);
@@ -140,7 +146,11 @@ const CameraComponent = () => {
 
     if (webcamRef.current) {
       const camera = new Camera(webcamRef.current.video, {
-        onFrame: async () => { await holistic.send({ image: webcamRef.current.video }); },
+        onFrame: async () => { 
+            if (webcamRef.current && webcamRef.current.video) {
+                await holistic.send({ image: webcamRef.current.video }); 
+            }
+        },
         width: 640, height: 480
       });
       camera.start();
