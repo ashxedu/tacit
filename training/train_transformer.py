@@ -4,7 +4,7 @@ import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
     Input, Dense, Dropout, LayerNormalization, 
-    MultiHeadAttention, GlobalAveragePooling1D, Add, Conv1D
+    GlobalAveragePooling1D, Add, Conv1D, Dot, Activation
 )
 from tensorflow.keras.callbacks import TensorBoard, EarlyStopping, ReduceLROnPlateau
 from sklearn.model_selection import train_test_split
@@ -52,18 +52,33 @@ def load_data():
 def build_transformer_model(input_shape, num_classes):
     inputs = Input(shape=input_shape)
     
-    # 1. Convolutional Positional Encoding Layer
-    # Projects the 258 features down to 64 and blends adjacent frames.
+    # 1. Convolutional Positional Encoding
     x = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(inputs)
     
-    # 2. Transformer Block
-    attention_output = MultiHeadAttention(num_heads=4, key_dim=64)(x, x)
+    # 2. Raw Self-Attention (100% TF.js Safe)
+    # Recreating the attention mechanism with fundamental browser-friendly layers
+    
+    # Create Query, Key, and Value projections
+    query = Dense(64)(x)
+    key = Dense(64)(x)
+    value = Dense(64)(x)
+    
+    # Calculate Attention Scores (Query * Key^T)
+    attention_scores = Dot(axes=[2, 2])([query, key])
+    
+    # Normalize scores into probabilities
+    attention_weights = Activation('softmax')(attention_scores)
+    
+    # Apply weights to Values
+    attention_output = Dot(axes=[2, 1])([attention_weights, value])
+    
+    # Add & Norm
     x = Add()([x, attention_output])
     x = LayerNormalization(epsilon=1e-6)(x)
     
     # Feed Forward Network
     ffn_output = Dense(128, activation="relu")(x)
-    ffn_output = Dense(64)(ffn_output) # Must match the 64 filters from Conv1D to Add()
+    ffn_output = Dense(64)(ffn_output)
     x = Add()([x, ffn_output])
     x = LayerNormalization(epsilon=1e-6)(x)
     
@@ -103,7 +118,7 @@ def main():
               callbacks=[tb, early, lr_decay], 
               validation_data=(X_test, y_test))
     
-    # model and classes
+    # Save the new model and classes
     model.save(os.path.join(MODELS_PATH, 'tacit_transformer.h5'))
     with open(os.path.join(MODELS_PATH, 'classes.pkl'), 'wb') as f:
         pickle.dump(classes, f)
