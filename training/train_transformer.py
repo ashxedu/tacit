@@ -4,7 +4,7 @@ import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
     Input, Dense, Dropout, LayerNormalization, 
-    MultiHeadAttention, GlobalAveragePooling1D, Embedding, Add
+    MultiHeadAttention, GlobalAveragePooling1D, Add, Conv1D
 )
 from tensorflow.keras.callbacks import TensorBoard, EarlyStopping, ReduceLROnPlateau
 from sklearn.model_selection import train_test_split
@@ -52,20 +52,18 @@ def load_data():
 def build_transformer_model(input_shape, num_classes):
     inputs = Input(shape=input_shape)
     
-    # 1. Positional Encoding (TF.js Safe Method)
-    positions = tf.range(start=0, limit=MAX_FRAMES, delta=1)
-    position_embeddings = Embedding(input_dim=MAX_FRAMES, output_dim=NUM_FEATURES)(positions)
-    x = inputs + position_embeddings
+    # 1. Convolutional Positional Encoding Layer
+    # Projects the 258 features down to 64 and blends adjacent frames.
+    x = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(inputs)
     
     # 2. Transformer Block
-    # Self-attention mechanism to look at all frames simultaneously
     attention_output = MultiHeadAttention(num_heads=4, key_dim=64)(x, x)
     x = Add()([x, attention_output])
     x = LayerNormalization(epsilon=1e-6)(x)
     
     # Feed Forward Network
     ffn_output = Dense(128, activation="relu")(x)
-    ffn_output = Dense(NUM_FEATURES)(ffn_output)
+    ffn_output = Dense(64)(ffn_output) # Must match the 64 filters from Conv1D to Add()
     x = Add()([x, ffn_output])
     x = LayerNormalization(epsilon=1e-6)(x)
     
@@ -100,12 +98,12 @@ def main():
     early = EarlyStopping(monitor='val_categorical_accuracy', patience=40, restore_best_weights=True)
     lr_decay = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=10, min_lr=0.00001)
     
-    # Training model
+    # Train the model
     model.fit(X_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE, 
               callbacks=[tb, early, lr_decay], 
               validation_data=(X_test, y_test))
     
-    # new model and classes
+    # model and classes
     model.save(os.path.join(MODELS_PATH, 'tacit_transformer.h5'))
     with open(os.path.join(MODELS_PATH, 'classes.pkl'), 'wb') as f:
         pickle.dump(classes, f)
