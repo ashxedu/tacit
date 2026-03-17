@@ -5,7 +5,6 @@ import { Holistic } from "@mediapipe/holistic";
 import { Camera } from "@mediapipe/camera_utils";
 import { drawConnectors, POSE_CONNECTIONS, HAND_CONNECTIONS } from "@mediapipe/drawing_utils";
 
-// 3D Imports
 import { Canvas } from "@react-three/fiber";
 import FloatingText from "./FloatingText";
 
@@ -17,19 +16,16 @@ const CameraComponent = () => {
   const [prediction, setPrediction] = useState("Loading...");
   const [confidence, setConfidence] = useState(0);
 
-  // Logic Buffers & Refs
   const predictionBuffer = useRef([]); 
-  const frameCounter = useRef(0); // For throttling CPU
-  const classLabelsRef = useRef([]); // Stores dynamic JSON labels safely without causing re-renders
+  const frameCounter = useRef(0); 
+  const classLabelsRef = useRef([]); 
 
   useEffect(() => {
     const loadModelAndClasses = async () => {
       try {
-        // 1. Load the JSON model from the public folder
         const net = await tf.loadLayersModel("/model/model.json");
         setModel(net);
         
-        // 2. Load the dynamic class labels exported by convert.py
         const response = await fetch("/model/classes.json");
         classLabelsRef.current = await response.json();
         
@@ -43,17 +39,14 @@ const CameraComponent = () => {
   }, []);
 
   const extractKeypoints = (results) => {
-    // Pose: 33 * 4 = 132
     const pose = results.poseLandmarks 
       ? results.poseLandmarks.flatMap(res => [res.x, res.y, res.z, res.visibility]) 
       : new Array(132).fill(0);
 
-    // Left Hand: 21 * 3 = 63
     const lh = results.leftHandLandmarks 
       ? results.leftHandLandmarks.flatMap(res => [res.x, res.y, res.z]) 
       : new Array(63).fill(0);
 
-    // Right Hand: 21 * 3 = 63
     const rh = results.rightHandLandmarks 
       ? results.rightHandLandmarks.flatMap(res => [res.x, res.y, res.z]) 
       : new Array(63).fill(0);
@@ -67,7 +60,6 @@ const CameraComponent = () => {
     const onResults = async (results) => {
       if (!canvasRef.current || !webcamRef.current || !webcamRef.current.video) return;
 
-      // 1. Draw Skeleton (Visual Feedback)
       const videoWidth = webcamRef.current.video.videoWidth;
       const videoHeight = webcamRef.current.video.videoHeight;
       canvasRef.current.width = videoWidth;
@@ -77,45 +69,47 @@ const CameraComponent = () => {
       ctx.save();
       ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
       
-      // Draw connectors (Green for body, White for hands)
       drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS, { color: "rgba(0, 255, 0, 0.5)", lineWidth: 1 });
       drawConnectors(ctx, results.leftHandLandmarks, HAND_CONNECTIONS, { color: "rgba(255, 255, 255, 0.8)", lineWidth: 1 });
       drawConnectors(ctx, results.rightHandLandmarks, HAND_CONNECTIONS, { color: "rgba(255, 255, 255, 0.8)", lineWidth: 1 });
       ctx.restore();
 
-      // 2. Data Collection (Run every frame to fill buffer)
-      // Ensure the model AND the dynamic labels are fully loaded before predicting
       if (model && classLabelsRef.current.length > 0) {
         const keypoints = extractKeypoints(results);
         sequence.push(keypoints);
-        if (sequence.length > 30) sequence.shift(); // Keep only last 30 frames
+        if (sequence.length > 30) sequence.shift(); 
 
-        // 3. AI Inference (Run ONLY every 3rd frame to save CPU)
         frameCounter.current += 1;
         if (sequence.length === 30 && frameCounter.current % 3 === 0) {
           
-          const input = tf.tensor([sequence]); 
+          // --- THE FRONTEND VELOCITY HACK ---
+          // Map the sequence to include delta velocities to match the Python 516 feature input
+          const sequenceWithVelocity = sequence.map((frame, i) => {
+            if (i === 0) {
+              return [...frame, ...new Array(258).fill(0)]; // Frame 0 has no velocity
+            }
+            const prevFrame = sequence[i - 1];
+            const velocity = frame.map((val, j) => val - prevFrame[j]);
+            return [...frame, ...velocity];
+          });
+
+          const input = tf.tensor([sequenceWithVelocity]); 
           const output = model.predict(input);
           const values = await output.data();
           const maxIndex = values.indexOf(Math.max(...values));
           
-          // DYNAMIC LABEL FETCH:
           const currentWord = classLabelsRef.current[maxIndex];
           const currentConf = values[maxIndex];
 
-          input.dispose(); output.dispose(); // Clean up memory to prevent leaks
+          input.dispose(); output.dispose(); 
 
-          // --- FORGIVING SMOOTHING LOGIC ---
           if (currentConf > 0.60) {
-            
             predictionBuffer.current.push(currentWord);
             
-            // Only look at last 7 predictions (approx 0.5 seconds)
             if (predictionBuffer.current.length > 7) {
               predictionBuffer.current.shift();
             }
             
-            // Majority Vote: If 4+ frames agree, show the word
             const counts = {};
             predictionBuffer.current.forEach(word => { counts[word] = (counts[word] || 0) + 1; });
             
@@ -125,16 +119,13 @@ const CameraComponent = () => {
               setPrediction(mostFrequentWord.toUpperCase());
               setConfidence(Math.round(currentConf * 100));
             }
-
           } else {
-             // If confidence is low, clear buffer (Reset)
              predictionBuffer.current = [];
           }
         }
       }
     };
 
-    // Initialize MediaPipe
     const holistic = new Holistic({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}` });
     holistic.setOptions({ 
       modelComplexity: 1, 
@@ -160,7 +151,6 @@ const CameraComponent = () => {
   return (
     <div style={{ width: "100vw", height: "100vh", backgroundColor: "#111", overflow: "hidden", position: "relative" }}>
       
-      {/* --- LAYER 1: THE GAME WORLD (3D Text Center) --- */}
       <div style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", zIndex: 1 }}>
         <Canvas camera={{ position: [0, 0, 6], fov: 60 }}>
           <ambientLight intensity={0.6} />
@@ -173,7 +163,6 @@ const CameraComponent = () => {
         </Canvas>
       </div>
 
-      {/* --- LAYER 2: THE HUD (Webcam + Confidence) --- */}
       <div style={{
         position: "absolute",
         bottom: "30px",
@@ -187,19 +176,15 @@ const CameraComponent = () => {
         zIndex: 10,
         backgroundColor: "black"
       }}>
-        {/* Webcam Video */}
         <Webcam 
           ref={webcamRef} 
           style={{ width: "100%", height: "100%", objectFit: "cover", transform: "scaleX(-1)" }} 
         />
-        
-        {/* Skeleton Overlay */}
         <canvas 
           ref={canvasRef} 
           style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", transform: "scaleX(-1)" }} 
         />
 
-        {/* Confidence Badge */}
         <div style={{
           position: "absolute",
           bottom: "10px",
@@ -215,7 +200,6 @@ const CameraComponent = () => {
           ACCURACY: {confidence}%
         </div>
       </div>
-
     </div>
   );
 };
