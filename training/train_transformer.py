@@ -19,9 +19,49 @@ LOG_DIR = os.path.join(BASE_DIR, "training", "logs_transformer")
 EPOCHS = 200
 BATCH_SIZE = 8
 MAX_FRAMES = 30
-BASE_FEATURES = 258
-# We now feed positions AND velocities (258 + 258 = 516)
-TOTAL_FEATURES = BASE_FEATURES * 2 
+BASE_FEATURES = 226 # Down from 258! (We pruned 32 lower-body features)
+TOTAL_FEATURES = BASE_FEATURES * 2 # 452 (Positions + Velocities)
+
+def normalize_and_prune(frame):
+    """
+    Converts absolute pixels to relative 3D geometry.
+    frame length: 258 (Pose: 0-131, LH: 132-194, RH: 195-257)
+    """
+    # 1. Feature Pruning: Keep only upper body (Landmarks 0-24)
+    # 25 landmarks * 4 values (x,y,z,v) = 100 features
+    pose_pruned = frame[0:100]
+    lh = frame[132:195]
+    rh = frame[195:258]
+
+    # 2. Find Anchor (Midpoint of left shoulder [11] and right shoulder [12])
+    # 11 * 4 = 44 | 12 * 4 = 48
+    ls = np.array([frame[44], frame[45], frame[46]])
+    rs = np.array([frame[48], frame[49], frame[50]])
+    
+    anchor = (ls + rs) / 2.0
+    
+    # 3. Create the Shoulder Ruler (Scale Invariance)
+    shoulder_dist = np.linalg.norm(ls - rs)
+    if shoulder_dist < 1e-5:
+        shoulder_dist = 1.0 # Crash prevention if pose is completely lost
+        
+    pruned_frame = np.concatenate([pose_pruned, lh, rh])
+
+    # 4. Normalize Pose (skip zeros to preserve "missing" states)
+    for i in range(0, 100, 4):
+        if pruned_frame[i] == 0 and pruned_frame[i+1] == 0: continue
+        pruned_frame[i]   = (pruned_frame[i]   - anchor[0]) / shoulder_dist
+        pruned_frame[i+1] = (pruned_frame[i+1] - anchor[1]) / shoulder_dist
+        pruned_frame[i+2] = (pruned_frame[i+2] - anchor[2]) / shoulder_dist
+
+    # 5. Normalize Hands
+    for i in range(100, 226, 3):
+        if pruned_frame[i] == 0 and pruned_frame[i+1] == 0: continue
+        pruned_frame[i]   = (pruned_frame[i]   - anchor[0]) / shoulder_dist
+        pruned_frame[i+1] = (pruned_frame[i+1] - anchor[1]) / shoulder_dist
+        pruned_frame[i+2] = (pruned_frame[i+2] - anchor[2]) / shoulder_dist
+
+    return pruned_frame
 
 def load_data():
     sequences, labels = [], []
@@ -29,8 +69,7 @@ def load_data():
         return [], [], []
     
     file_list = [f for f in os.listdir(DATA_PATH) if f.endswith(".npy")]
-    if not file_list:
-        return [], [], []
+    if not file_list: return [], [], []
     
     all_labels = sorted(list(set([f.split('_')[0] for f in file_list])))
     label_map = {label: num for num, label in enumerate(all_labels)}
@@ -40,20 +79,16 @@ def load_data():
         word = filename.split('_')[0]
         res = np.load(os.path.join(DATA_PATH, filename))
         
-        # Standardize length to 30 frames
-        if len(res) > MAX_FRAMES: 
-            res = res[:MAX_FRAMES]
-        elif len(res) < MAX_FRAMES: 
-            res = np.concatenate((res, np.zeros((MAX_FRAMES - len(res), BASE_FEATURES))))
+        if len(res) > MAX_FRAMES: res = res[:MAX_FRAMES]
+        elif len(res) < MAX_FRAMES: res = np.concatenate((res, np.zeros((MAX_FRAMES - len(res), 258))))
             
-        # --- THE VELOCITY HACK ---
-        # Calculate the difference between consecutive frames
-        velocities = np.diff(res, axis=0)
-        # diff() reduces length by 1. Prepend a row of zeros to maintain 30 frames.
-        velocities = np.vstack([np.zeros((1, BASE_FEATURES)), velocities])
+        # Apply the Geometry Filter to every frame
+        normalized_res = np.array([normalize_and_prune(frame) for frame in res])
         
-        # Combine positions and velocities into a single 516-length vector per frame
-        res_combined = np.concatenate((res, velocities), axis=1)
+        # Calculate Velocities on the normalized data
+        velocities = np.diff(normalized_res, axis=0)
+        velocities = np.vstack([np.zeros((1, BASE_FEATURES)), velocities])
+        res_combined = np.concatenate((normalized_res, velocities), axis=1)
             
         sequences.append(res_combined)
         labels.append(label_map[word])
@@ -62,11 +97,8 @@ def load_data():
 
 def build_transformer_model(input_shape, num_classes):
     inputs = Input(shape=input_shape)
-    
-    # 1. Convolutional Positional Encoding
     x = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(inputs)
     
-    # 2. Raw Self-Attention (100% TF.js Safe)
     query = Dense(64)(x)
     key = Dense(64)(x)
     value = Dense(64)(x)
@@ -75,17 +107,14 @@ def build_transformer_model(input_shape, num_classes):
     attention_weights = Activation('softmax')(attention_scores)
     attention_output = Dot(axes=[2, 1])([attention_weights, value])
     
-    # Add & Norm
     x = Add()([x, attention_output])
     x = LayerNormalization(epsilon=1e-6)(x)
     
-    # Feed Forward Network
     ffn_output = Dense(128, activation="relu")(x)
     ffn_output = Dense(64)(ffn_output)
     x = Add()([x, ffn_output])
     x = LayerNormalization(epsilon=1e-6)(x)
     
-    # 3. Classification Head
     x = GlobalAveragePooling1D()(x)
     x = Dropout(0.4)(x)
     x = Dense(64, activation="relu")(x)
@@ -98,32 +127,22 @@ def build_transformer_model(input_shape, num_classes):
 def main():
     if not os.path.exists(MODELS_PATH): os.makedirs(MODELS_PATH)
     if not os.path.exists(LOG_DIR): os.makedirs(LOG_DIR)
-    
     X, y, classes = load_data()
-    if len(classes) == 0: 
-        print("❌ No processed data found. Did you run process_manual.py?")
-        return
+    if len(classes) == 0: return
 
     y = tf.keras.utils.to_categorical(y).astype(int)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
     
-    print(f"🧠 Training Tacit Transformer on {X.shape[0]} samples with Velocity Vectors...")
+    print(f"🧠 Training Tacit on {X.shape[0]} normalized samples (452 features)...")
 
     model = build_transformer_model((MAX_FRAMES, TOTAL_FEATURES), len(classes))
-    model.summary()
-    
     tb = TensorBoard(log_dir=LOG_DIR)
     early = EarlyStopping(monitor='val_categorical_accuracy', patience=40, restore_best_weights=True)
     lr_decay = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=10, min_lr=0.00001)
     
-    model.fit(X_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE, 
-              callbacks=[tb, early, lr_decay], 
-              validation_data=(X_test, y_test))
-    
+    model.fit(X_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=[tb, early, lr_decay], validation_data=(X_test, y_test))
     model.save(os.path.join(MODELS_PATH, 'tacit_transformer.h5'))
-    with open(os.path.join(MODELS_PATH, 'classes.pkl'), 'wb') as f:
-        pickle.dump(classes, f)
-        
+    with open(os.path.join(MODELS_PATH, 'classes.pkl'), 'wb') as f: pickle.dump(classes, f)
     print(f"✅ Training Complete. Class order: {classes}")
 
 if __name__ == "__main__":
