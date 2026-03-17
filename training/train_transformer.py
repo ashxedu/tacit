@@ -19,49 +19,57 @@ LOG_DIR = os.path.join(BASE_DIR, "training", "logs_transformer")
 EPOCHS = 200
 BATCH_SIZE = 8
 MAX_FRAMES = 30
-BASE_FEATURES = 226 # Down from 258! (We pruned 32 lower-body features)
+BASE_FEATURES = 226 # Pruned lower-body features
 TOTAL_FEATURES = BASE_FEATURES * 2 # 452 (Positions + Velocities)
 
 def normalize_and_prune(frame):
     """
-    Converts absolute pixels to relative 3D geometry.
+    Dual-Anchor Geometry:
+    Pose is anchored to the Chest. Hands are anchored to the Wrists.
     frame length: 258 (Pose: 0-131, LH: 132-194, RH: 195-257)
     """
-    # 1. Feature Pruning: Keep only upper body (Landmarks 0-24)
+    # 1. Feature Pruning & Isolation (Keep only upper body)
     # 25 landmarks * 4 values (x,y,z,v) = 100 features
-    pose_pruned = frame[0:100]
-    lh = frame[132:195]
-    rh = frame[195:258]
+    pose_pruned = frame[0:100].copy()
+    lh = frame[132:195].copy()
+    rh = frame[195:258].copy()
 
-    # 2. Find Anchor (Midpoint of left shoulder [11] and right shoulder [12])
-    # 11 * 4 = 44 | 12 * 4 = 48
+    # 2. Define the Anchors
+    # Midpoint of left shoulder [11] and right shoulder [12]
     ls = np.array([frame[44], frame[45], frame[46]])
     rs = np.array([frame[48], frame[49], frame[50]])
     
-    anchor = (ls + rs) / 2.0
+    pose_anchor = (ls + rs) / 2.0  # Center of chest
+    lh_anchor = np.array([lh[0], lh[1], lh[2]]) if np.any(lh) else np.zeros(3) # Left Wrist
+    rh_anchor = np.array([rh[0], rh[1], rh[2]]) if np.any(rh) else np.zeros(3) # Right Wrist
     
     # 3. Create the Shoulder Ruler (Scale Invariance)
     shoulder_dist = np.linalg.norm(ls - rs)
     if shoulder_dist < 1e-5:
-        shoulder_dist = 1.0 # Crash prevention if pose is completely lost
+        shoulder_dist = 1.0 # Crash prevention
         
-    pruned_frame = np.concatenate([pose_pruned, lh, rh])
-
-    # 4. Normalize Pose (skip zeros to preserve "missing" states)
+    # 4. Normalize Pose (Relative to Chest)
     for i in range(0, 100, 4):
-        if pruned_frame[i] == 0 and pruned_frame[i+1] == 0: continue
-        pruned_frame[i]   = (pruned_frame[i]   - anchor[0]) / shoulder_dist
-        pruned_frame[i+1] = (pruned_frame[i+1] - anchor[1]) / shoulder_dist
-        pruned_frame[i+2] = (pruned_frame[i+2] - anchor[2]) / shoulder_dist
+        if pose_pruned[i] == 0 and pose_pruned[i+1] == 0: continue
+        pose_pruned[i]   = (pose_pruned[i]   - pose_anchor[0]) / shoulder_dist
+        pose_pruned[i+1] = (pose_pruned[i+1] - pose_anchor[1]) / shoulder_dist
+        pose_pruned[i+2] = (pose_pruned[i+2] - pose_anchor[2]) / shoulder_dist
 
-    # 5. Normalize Hands
-    for i in range(100, 226, 3):
-        if pruned_frame[i] == 0 and pruned_frame[i+1] == 0: continue
-        pruned_frame[i]   = (pruned_frame[i]   - anchor[0]) / shoulder_dist
-        pruned_frame[i+1] = (pruned_frame[i+1] - anchor[1]) / shoulder_dist
-        pruned_frame[i+2] = (pruned_frame[i+2] - anchor[2]) / shoulder_dist
+    # 5. Normalize Left Hand (Relative to Left Wrist)
+    if np.any(lh):
+        for i in range(0, 63, 3):
+            lh[i]   = (lh[i]   - lh_anchor[0]) / shoulder_dist
+            lh[i+1] = (lh[i+1] - lh_anchor[1]) / shoulder_dist
+            lh[i+2] = (lh[i+2] - lh_anchor[2]) / shoulder_dist
 
-    return pruned_frame
+    # 6. Normalize Right Hand (Relative to Right Wrist)
+    if np.any(rh):
+        for i in range(0, 63, 3):
+            rh[i]   = (rh[i]   - rh_anchor[0]) / shoulder_dist
+            rh[i+1] = (rh[i+1] - rh_anchor[1]) / shoulder_dist
+            rh[i+2] = (rh[i+2] - rh_anchor[2]) / shoulder_dist
+
+    return np.concatenate([pose_pruned, lh, rh])
 
 def load_data():
     sequences, labels = [], []
@@ -82,7 +90,7 @@ def load_data():
         if len(res) > MAX_FRAMES: res = res[:MAX_FRAMES]
         elif len(res) < MAX_FRAMES: res = np.concatenate((res, np.zeros((MAX_FRAMES - len(res), 258))))
             
-        # Apply the Geometry Filter to every frame
+        # Apply the Dual-Anchor Geometry Filter to every frame
         normalized_res = np.array([normalize_and_prune(frame) for frame in res])
         
         # Calculate Velocities on the normalized data
@@ -133,7 +141,7 @@ def main():
     y = tf.keras.utils.to_categorical(y).astype(int)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
     
-    print(f"🧠 Training Tacit on {X.shape[0]} normalized samples (452 features)...")
+    print(f"🧠 Training Tacit on {X.shape[0]} normalized samples (Dual-Anchor 452 features)...")
 
     model = build_transformer_model((MAX_FRAMES, TOTAL_FEATURES), len(classes))
     tb = TensorBoard(log_dir=LOG_DIR)
