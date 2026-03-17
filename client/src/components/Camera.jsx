@@ -57,6 +57,45 @@ const CameraComponent = () => {
   useEffect(() => {
     let sequence = []; 
 
+    // --- NEW GEOMETRY FILTER ---
+    const normalizeAndPrune = (frame) => {
+      // 1. Prune lower body (Keep only first 25 pose landmarks: 25 * 4 = 100 features)
+      const posePruned = frame.slice(0, 100);
+      const lh = frame.slice(132, 195);
+      const rh = frame.slice(195, 258);
+
+      // 2. Find Anchor (Midpoint of left shoulder [index 11] and right shoulder [index 12])
+      // 11 * 4 = 44 | 12 * 4 = 48
+      const ls = [frame[44], frame[45], frame[46]];
+      const rs = [frame[48], frame[49], frame[50]];
+
+      const anchor = [(ls[0] + rs[0]) / 2, (ls[1] + rs[1]) / 2, (ls[2] + rs[2]) / 2];
+
+      // 3. Create the Shoulder Ruler (Scale Invariance)
+      let shoulderDist = Math.hypot(ls[0] - rs[0], ls[1] - rs[1], ls[2] - rs[2]);
+      if (shoulderDist < 1e-5) shoulderDist = 1.0; // Crash prevention
+
+      const prunedFrame = [...posePruned, ...lh, ...rh]; // Length is now 226
+
+      // 4. Normalize Pose (x, y, z) - Skip visibility
+      for (let i = 0; i < 100; i += 4) {
+        if (prunedFrame[i] === 0 && prunedFrame[i+1] === 0) continue;
+        prunedFrame[i] = (prunedFrame[i] - anchor[0]) / shoulderDist;
+        prunedFrame[i+1] = (prunedFrame[i+1] - anchor[1]) / shoulderDist;
+        prunedFrame[i+2] = (prunedFrame[i+2] - anchor[2]) / shoulderDist;
+      }
+
+      // 5. Normalize Hands (x, y, z)
+      for (let i = 100; i < 226; i += 3) {
+        if (prunedFrame[i] === 0 && prunedFrame[i+1] === 0) continue;
+        prunedFrame[i] = (prunedFrame[i] - anchor[0]) / shoulderDist;
+        prunedFrame[i+1] = (prunedFrame[i+1] - anchor[1]) / shoulderDist;
+        prunedFrame[i+2] = (prunedFrame[i+2] - anchor[2]) / shoulderDist;
+      }
+
+      return prunedFrame;
+    };
+
     const onResults = async (results) => {
       if (!canvasRef.current || !webcamRef.current || !webcamRef.current.video) return;
 
@@ -76,17 +115,21 @@ const CameraComponent = () => {
 
       if (model && classLabelsRef.current.length > 0) {
         const keypoints = extractKeypoints(results);
-        sequence.push(keypoints);
+        
+        // Apply the geometry math before pushing to the buffer
+        const normalizedKeypoints = normalizeAndPrune(keypoints); 
+        sequence.push(normalizedKeypoints);
+        
         if (sequence.length > 30) sequence.shift(); 
 
         frameCounter.current += 1;
         if (sequence.length === 30 && frameCounter.current % 3 === 0) {
           
           // --- THE FRONTEND VELOCITY HACK ---
-          // Map the sequence to include delta velocities to match the Python 516 feature input
           const sequenceWithVelocity = sequence.map((frame, i) => {
             if (i === 0) {
-              return [...frame, ...new Array(258).fill(0)]; // Frame 0 has no velocity
+              // Now padding with 226 zeros instead of 258
+              return [...frame, ...new Array(226).fill(0)]; 
             }
             const prevFrame = sequence[i - 1];
             const velocity = frame.map((val, j) => val - prevFrame[j]);
