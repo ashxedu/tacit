@@ -23,53 +23,34 @@ BASE_FEATURES = 226 # Pruned lower-body features
 TOTAL_FEATURES = BASE_FEATURES * 2 # 452 (Positions + Velocities)
 
 def normalize_and_prune(frame):
-    """
-    Dual-Anchor Geometry:
-    Pose is anchored to the Chest. Hands are anchored to the Wrists.
-    frame length: 258 (Pose: 0-131, LH: 132-194, RH: 195-257)
-    """
-    # 1. Feature Pruning & Isolation (Keep only upper body)
-    # 25 landmarks * 4 values (x,y,z,v) = 100 features
+    # 1. Isolate components (Keep only upper body)
     pose_pruned = frame[0:100].copy()
     lh = frame[132:195].copy()
     rh = frame[195:258].copy()
 
-    # 2. Define the Anchors
-    # Midpoint of left shoulder [11] and right shoulder [12]
+    # 2. Chest Anchor
     ls = np.array([frame[44], frame[45], frame[46]])
     rs = np.array([frame[48], frame[49], frame[50]])
+    anchor = (ls + rs) / 2.0
     
-    pose_anchor = (ls + rs) / 2.0  # Center of chest
-    lh_anchor = np.array([lh[0], lh[1], lh[2]]) if np.any(lh) else np.zeros(3) # Left Wrist
-    rh_anchor = np.array([rh[0], rh[1], rh[2]]) if np.any(rh) else np.zeros(3) # Right Wrist
-    
-    # 3. Create the Shoulder Ruler (Scale Invariance)
+    # 3. Shoulder Ruler
     shoulder_dist = np.linalg.norm(ls - rs)
     if shoulder_dist < 1e-5:
-        shoulder_dist = 1.0 # Crash prevention
+        shoulder_dist = 1.0 
         
-    # 4. Normalize Pose (Relative to Chest)
-    for i in range(0, 100, 4):
-        if pose_pruned[i] == 0 and pose_pruned[i+1] == 0: continue
-        pose_pruned[i]   = (pose_pruned[i]   - pose_anchor[0]) / shoulder_dist
-        pose_pruned[i+1] = (pose_pruned[i+1] - pose_anchor[1]) / shoulder_dist
-        pose_pruned[i+2] = (pose_pruned[i+2] - pose_anchor[2]) / shoulder_dist
+    pruned_frame = np.concatenate([pose_pruned, lh, rh])
 
-    # 5. Normalize Left Hand (Relative to Left Wrist)
-    if np.any(lh):
-        for i in range(0, 63, 3):
-            lh[i]   = (lh[i]   - lh_anchor[0]) / shoulder_dist
-            lh[i+1] = (lh[i+1] - lh_anchor[1]) / shoulder_dist
-            lh[i+2] = (lh[i+2] - lh_anchor[2]) / shoulder_dist
+    # 4. Normalize EVERYTHING to the Chest
+    for i in range(0, 226, 4 if i < 100 else 3):
+        # Skip visibility flag for pose (every 4th item)
+        if i < 100 and (i + 3) % 4 == 3: continue 
+        
+        if pruned_frame[i] == 0 and pruned_frame[i+1] == 0: continue
+        pruned_frame[i]   = (pruned_frame[i]   - anchor[0]) / shoulder_dist
+        pruned_frame[i+1] = (pruned_frame[i+1] - anchor[1]) / shoulder_dist
+        pruned_frame[i+2] = (pruned_frame[i+2] - anchor[2]) / shoulder_dist
 
-    # 6. Normalize Right Hand (Relative to Right Wrist)
-    if np.any(rh):
-        for i in range(0, 63, 3):
-            rh[i]   = (rh[i]   - rh_anchor[0]) / shoulder_dist
-            rh[i+1] = (rh[i+1] - rh_anchor[1]) / shoulder_dist
-            rh[i+2] = (rh[i+2] - rh_anchor[2]) / shoulder_dist
-
-    return np.concatenate([pose_pruned, lh, rh])
+    return pruned_frame
 
 def load_data():
     sequences, labels = [], []

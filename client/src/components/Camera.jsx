@@ -59,57 +59,31 @@ const CameraComponent = () => {
 
     // --- DUAL-ANCHOR GEOMETRY FILTER ---
     const normalizeAndPrune = (frame) => {
-      // 1. Isolate components (Prune lower body)
       const posePruned = frame.slice(0, 100);
       const lh = frame.slice(132, 195);
       const rh = frame.slice(195, 258);
 
-      // 2. Define Anchors
       const ls = [frame[44], frame[45], frame[46]];
       const rs = [frame[48], frame[49], frame[50]];
-      
-      const poseAnchor = [(ls[0] + rs[0]) / 2, (ls[1] + rs[1]) / 2, (ls[2] + rs[2]) / 2];
-      
-      // Determine if hands are visible (MediaPipe fills with 0s if not)
-      const lhVisible = lh.some(val => val !== 0);
-      const rhVisible = rh.some(val => val !== 0);
+      const anchor = [(ls[0] + rs[0]) / 2, (ls[1] + rs[1]) / 2, (ls[2] + rs[2]) / 2];
 
-      const lhAnchor = lhVisible ? [lh[0], lh[1], lh[2]] : [0, 0, 0]; // Left Wrist
-      const rhAnchor = rhVisible ? [rh[0], rh[1], rh[2]] : [0, 0, 0]; // Right Wrist
-
-      // 3. Shoulder Ruler (Scale Invariance)
       let shoulderDist = Math.hypot(ls[0] - rs[0], ls[1] - rs[1], ls[2] - rs[2]);
-      if (shoulderDist < 1e-5) shoulderDist = 1.0; // Crash prevention
+      if (shoulderDist < 1e-5) shoulderDist = 1.0; 
 
-      // 4. Normalize Pose (Relative to Chest)
-      for (let i = 0; i < 100; i += 4) {
-        if (posePruned[i] === 0 && posePruned[i+1] === 0) continue;
-        posePruned[i] = (posePruned[i] - poseAnchor[0]) / shoulderDist;
-        posePruned[i+1] = (posePruned[i+1] - poseAnchor[1]) / shoulderDist;
-        posePruned[i+2] = (posePruned[i+2] - poseAnchor[2]) / shoulderDist;
+      const prunedFrame = [...posePruned, ...lh, ...rh];
+
+      for (let i = 0; i < 226; i += (i < 100 ? 4 : 3)) {
+        if (i < 100 && (i + 3) % 4 === 3) continue;
+        
+        if (prunedFrame[i] === 0 && prunedFrame[i+1] === 0) continue;
+        prunedFrame[i] = (prunedFrame[i] - anchor[0]) / shoulderDist;
+        prunedFrame[i+1] = (prunedFrame[i+1] - anchor[1]) / shoulderDist;
+        prunedFrame[i+2] = (prunedFrame[i+2] - anchor[2]) / shoulderDist;
       }
 
-      // 5. Normalize Left Hand (Relative to Left Wrist)
-      if (lhVisible) {
-        for (let i = 0; i < 63; i += 3) {
-          lh[i] = (lh[i] - lhAnchor[0]) / shoulderDist;
-          lh[i+1] = (lh[i+1] - lhAnchor[1]) / shoulderDist;
-          lh[i+2] = (lh[i+2] - lhAnchor[2]) / shoulderDist;
-        }
-      }
-
-      // 6. Normalize Right Hand (Relative to Right Wrist)
-      if (rhVisible) {
-        for (let i = 0; i < 63; i += 3) {
-          rh[i] = (rh[i] - rhAnchor[0]) / shoulderDist;
-          rh[i+1] = (rh[i+1] - rhAnchor[1]) / shoulderDist;
-          rh[i+2] = (rh[i+2] - rhAnchor[2]) / shoulderDist;
-        }
-      }
-
-      return [...posePruned, ...lh, ...rh];
+      return prunedFrame;
     };
-
+    
     const onResults = async (results) => {
       if (!canvasRef.current || !webcamRef.current || !webcamRef.current.video) return;
 
