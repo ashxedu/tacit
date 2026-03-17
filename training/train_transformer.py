@@ -19,7 +19,9 @@ LOG_DIR = os.path.join(BASE_DIR, "training", "logs_transformer")
 EPOCHS = 200
 BATCH_SIZE = 8
 MAX_FRAMES = 30
-NUM_FEATURES = 258
+BASE_FEATURES = 258
+# We now feed positions AND velocities (258 + 258 = 516)
+TOTAL_FEATURES = BASE_FEATURES * 2 
 
 def load_data():
     sequences, labels = [], []
@@ -42,9 +44,18 @@ def load_data():
         if len(res) > MAX_FRAMES: 
             res = res[:MAX_FRAMES]
         elif len(res) < MAX_FRAMES: 
-            res = np.concatenate((res, np.zeros((MAX_FRAMES - len(res), NUM_FEATURES))))
+            res = np.concatenate((res, np.zeros((MAX_FRAMES - len(res), BASE_FEATURES))))
             
-        sequences.append(res)
+        # --- THE VELOCITY HACK ---
+        # Calculate the difference between consecutive frames
+        velocities = np.diff(res, axis=0)
+        # diff() reduces length by 1. Prepend a row of zeros to maintain 30 frames.
+        velocities = np.vstack([np.zeros((1, BASE_FEATURES)), velocities])
+        
+        # Combine positions and velocities into a single 516-length vector per frame
+        res_combined = np.concatenate((res, velocities), axis=1)
+            
+        sequences.append(res_combined)
         labels.append(label_map[word])
         
     return np.array(sequences), np.array(labels), all_labels
@@ -56,20 +67,12 @@ def build_transformer_model(input_shape, num_classes):
     x = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(inputs)
     
     # 2. Raw Self-Attention (100% TF.js Safe)
-    # Recreating the attention mechanism with fundamental browser-friendly layers
-    
-    # Create Query, Key, and Value projections
     query = Dense(64)(x)
     key = Dense(64)(x)
     value = Dense(64)(x)
     
-    # Calculate Attention Scores (Query * Key^T)
     attention_scores = Dot(axes=[2, 2])([query, key])
-    
-    # Normalize scores into probabilities
     attention_weights = Activation('softmax')(attention_scores)
-    
-    # Apply weights to Values
     attention_output = Dot(axes=[2, 1])([attention_weights, value])
     
     # Add & Norm
@@ -104,21 +107,19 @@ def main():
     y = tf.keras.utils.to_categorical(y).astype(int)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
     
-    print(f"🧠 Training Tacit Transformer on {X.shape[0]} samples...")
+    print(f"🧠 Training Tacit Transformer on {X.shape[0]} samples with Velocity Vectors...")
 
-    model = build_transformer_model((MAX_FRAMES, NUM_FEATURES), len(classes))
+    model = build_transformer_model((MAX_FRAMES, TOTAL_FEATURES), len(classes))
     model.summary()
     
     tb = TensorBoard(log_dir=LOG_DIR)
     early = EarlyStopping(monitor='val_categorical_accuracy', patience=40, restore_best_weights=True)
     lr_decay = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=10, min_lr=0.00001)
     
-    # Train the model
     model.fit(X_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE, 
               callbacks=[tb, early, lr_decay], 
               validation_data=(X_test, y_test))
     
-    # Save the new model and classes
     model.save(os.path.join(MODELS_PATH, 'tacit_transformer.h5'))
     with open(os.path.join(MODELS_PATH, 'classes.pkl'), 'wb') as f:
         pickle.dump(classes, f)
