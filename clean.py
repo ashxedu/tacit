@@ -7,9 +7,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # The directories we want to completely wipe
 FOLDERS_TO_NUKE = [
     os.path.join(BASE_DIR, "training", "logs"),
+    os.path.join(BASE_DIR, "training", "logs_transformer"),
     os.path.join(BASE_DIR, "training", "models"),
     os.path.join(BASE_DIR, "client", "public", "model"),
-    os.path.join(BASE_DIR, "data", "processed") # Wipes old 15-word extractions
+    os.path.join(BASE_DIR, "data", "processed")
 ]
 
 def clean_slate():
